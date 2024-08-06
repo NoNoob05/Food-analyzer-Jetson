@@ -1,4 +1,0 @@
-flask
-jetson-inference
-jetson-utils
-opencv-python
