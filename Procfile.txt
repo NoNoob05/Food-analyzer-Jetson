@@ -1,1 +1,1 @@
-web: python frutasvideo.py
+web: python3 frutasvideo.py
