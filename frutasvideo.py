@@ -1,56 +1,73 @@
-import flask
-import sys
-import os
+import jetson.inference
+import jetson.utils
+import cv2
+import numpy as np
 
-app = flask.Flask(__name__)
+# Initialize the object detection network
+net = jetson.inference.detectNet(argv=['--model=frutas.onnx', '--labels=labels.txt', '--input-blob=input_0', '--output-cvg=scores', '--output-bbox=boxes'])
 
-@app.route('/')
-def home():
-    return "Food Analyzer Jetson"
+# Initialize video source (camera) and output (display)
+camera = jetson.utils.videoSource("/dev/video0")  # using a USB camera
+display = jetson.utils.videoOutput()  # creating an output window
 
-if __name__ == "__main__":
-    # Check if running on a Jetson device
-    ON_JETSON = False
-    try:
-        import jetson.inference
-        import jetson.utils
-        ON_JETSON = True
-    except ImportError:
-        # Mock the jetson modules if not running on a Jetson device
-        class MockJetson:
-            def Detect(self, img):
-                return []
+# Define Canny Edge Detection parameters
+low_threshold = 50
+high_threshold = 150
 
-            def __getattr__(self, name):
-                return lambda *args, **kwargs: None
+while display.IsStreaming():
+    # Capture image from the camera
+    img = camera.Capture()
 
-        jetson = MockJetson()
-        jetson.utils = MockJetson()
+    # Convert to numpy for OpenCV processing
+    frame = jetson.utils.cudaToNumpy(img)
 
-    if ON_JETSON:
-        net = jetson.inference.detectNet(argv=['--model=frutas.onnx', '--labels=labels.txt', '--input-blob=input_0', '--output-cvg=scores', '--output-bbox=boxes'])
-        camera = jetson.utils.videoSource("/dev/video0")
-        display = jetson.utils.videoOutput()
-    else:
-        net = MockJetson()
-        camera = MockJetson()
-        display = MockJetson()
+    # Convert the image to grayscale (Canny edge detection works on grayscale images)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    while True:
-        if ON_JETSON:
-            img = camera.Capture()
-        else:
-            img = None  # Mock image or handle accordingly
+    # Apply Canny Edge Detection
+    edges = cv2.Canny(gray, low_threshold, high_threshold)
 
-        detect = net.Detect(img)
-        if detect:
-            print("DETECTION FRUIT")
+    # Convert edges back to color so we can overlay with the original
+    edges_color = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
 
-        if ON_JETSON:
-            display.Render(img)
-            display.SetStatus("Fruits | Network {:.0f}FPS".format(net.GetNetworkFPS()))
+    # Combine edges with the original image
+    combined_img = cv2.addWeighted(frame, 0.8, edges_color, 0.2, 0)
 
-        if not ON_JETSON or not camera.IsStreaming() or not display.IsStreaming():
-            break
+    # Perform object detection
+    detections = net.Detect(img)
 
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    # Iterate over detections to display fruit name and confidence percentage inside the fruit
+    for detection in detections:
+        class_id = detection.ClassID
+        confidence = detection.Confidence * 100  # confidence in percentage
+        class_desc = net.GetClassDesc(class_id)  # Get the fruit name
+
+        # Get the coordinates of the detected fruit
+        x_left, y_top = int(detection.Left), int(detection.Top)
+        x_right, y_bottom = int(detection.Right), int(detection.Bottom)
+
+        # Calculate the center of the detected fruit area for placing the text
+        x_center = (x_left + x_right) // 2
+        y_center = (y_top + y_bottom) // 2
+
+        # Draw the fruit name and confidence percentage inside the fruit
+        text = f"{class_desc}: {confidence:.2f}%"
+
+        # Use OpenCV to add text in the detected fruit area without drawing any bounding box
+        font_scale = 1.0
+        font_thickness = 2
+        font_color = (0, 255, 0)  # Green color for text
+        cv2.putText(combined_img, text, (x_center, y_center), cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_color, font_thickness, lineType=cv2.LINE_AA)
+
+    # Convert back to CUDA for display
+    cuda_output = jetson.utils.cudaFromNumpy(combined_img)
+
+    # Render the image with the detections and edges
+    display.Render(cuda_output)
+
+    # Set the display status message
+    display.SetStatus("Fruit Detection | Network {:.0f} FPS".format(net.GetNetworkFPS()))
+
+    # Break the loop if the camera or display is not streaming
+    if not camera.IsStreaming() or not display.IsStreaming():
+        break
